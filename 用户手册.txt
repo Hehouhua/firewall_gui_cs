@@ -1,0 +1,18 @@
+运行环境：
+客户端和服务端一样：
+Python3，Windows 7或Windows 8或Windows 10或Linux
+
+安装：
+服务端:
+
+pip3 install pycryptodome
+x
+客户端
+
+pip3 install pycryptodomex
+
+pip3 install PyQT5
+
+已知bug：
+客户端添加主机后不能在规则界面看到，需要退出程序后再次打开
+
