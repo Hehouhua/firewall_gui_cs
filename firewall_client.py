@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 #encoding=utf-8
-from Cryptodome.Cipher import AES  
+from Cryptodome.Cipher import AES
+from netaddr import IPNetwork
 from binascii import b2a_hex, a2b_hex
-import os,sys,socket,threading,time,datetime,logging
+import os,sys,socket,threading,time,datetime,logging,struct
 from PyQt5.QtCore import (PYQT_VERSION_STR, QDate, QFile, QRegExp, QVariant, QModelIndex,Qt)
 from PyQt5.QtWidgets import (QApplication,QComboBox,
                              QDateTimeEdit, QDialog, QGridLayout, QHBoxLayout, QLabel,
@@ -12,7 +13,7 @@ from PyQt5.QtGui import QPixmap,QCursor,QRegExpValidator
 from PyQt5.QtSql import (QSqlDatabase, QSqlQuery, QSqlRelation,
                          QSqlRelationalDelegate, QSqlRelationalTableModel,QSqlTableModel)
 FORMAT = '[%(levelname)s]\t%(asctime)s : %(message)s'
-LOG_NAME = datetime.datetime.now().strftime('FirewallTool_Client_%Y_%m_%d_%H.log')
+LOG_NAME = datetime.datetime.now().strftime('Firewall_Client_%Y_%m_%d_%H.log')
 logging.basicConfig(filename=LOG_NAME, level = logging.DEBUG, format=FORMAT)
 MAC = True
 try:
@@ -21,30 +22,67 @@ except ImportError:
     MAC = False
 
 #password表
-ID = 0
-HOST = 1
-PASSWORD=2
+PASSWORD_ID = 0
+PASSWORD_HOST = 1
+PASSWORD_PASSWORD=2
+PASSWORD_TIME =3
+#password_log表
+PASSWORD_LOG_ID = 0
+PASSWORD_LOG_HOST = 1
+PASSWORD_LOG_USERNAME = 2
+PASSWORD_LOG_PASSWORD=3
+PASSWORD_LOG_TIME=4
 #hosts表
-ID = 0
-HOST = 1
-DESCRIPTION= 2 
-TIME=3
+HOSTS_ID = 0
+HOSTS_HOST = 1
+HOSTS_USERNAME = 2
+HOSTS_DESCRIPTION= 3
+HOSTS_TIME = 4
 #rules表
-ID = 0
-HOST = 1
-DIRECTION = 2
-IP  = 3
-PORT = 4
-PROTOCOL = 5
-ACTION =6
-NAME = 7
+RULES_ID = 0
+RULES_HOST = 1
+RULES_DIRECTION = 2
+RULES_IP  = 3
+RULES_PORT = 4
+RULES_PROTOCOL = 5
+RULES_ACTION =6
+RULES_NAME = 7
+RULES_TIME = 8
+RULES_PUSHED = 9
 #服务器监听的端口
 SERVER_PORT=7777
 #几天修改一次密码
 CHANGE_PASSWORD_FREQUENCY=7
 #几秒检查一次密码是否到期了，8*60*60表示8小时
 CHECK_CHANGE_PASSWORD_INTERVAL=8*60*60
+AES_KEY=b'5xQLFb4RdA9wqYi2'
 
+ip2num = lambda ip:sum([256**j*int(i) for j,i in enumerate(ip.split('.')[::-1])])
+num2ip = lambda num:socket.inet_ntoa(struct.pack('I',socket.htonl(num))) 
+def parseSubnet(subnetStr):
+    cidr=subnetStr.strip()
+    ip_list=[]
+    if len(cidr)>0:
+        if cidr.find('-') != -1: #检查是否有-
+            ip=[]                
+            ip_range=cidr.split('-')
+            ip_start=ip_range[0] #设定起始IP地址
+            ip_end=ip_range[1]
+            ip_start_num=ip2num(ip_start)
+            ip_end_num=ip2num(ip_end)
+            num=ip_start_num
+            while num <= ip_end_num:
+                ip.append(num2ip(num)) #把数字转换成ip       
+                num+=1
+        elif cidr.lower()==cidr.upper():#ip address
+            ip = IPNetwork(cidr)
+            ip = list(ip)
+        else:
+            ip=[cidr]#hostname
+        for each_ip in ip:
+            ip_list.append(str(each_ip))
+    return ip_list
+    
 def gen_random_name():
     import random
     import string
@@ -80,7 +118,8 @@ def createDB():
     query.exec_("""CREATE TABLE if not exists hosts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 host VARCHAR(32) NOT NULL,
-                description VARCHAR(40) NOT NULL,
+                username VARCHAR(32) NOT NULL,
+                description VARCHAR(40) ,
                 time DATETIME DEFAULT (datetime('now', 'localtime')),
                 UNIQUE(host))""")
     query.exec_("""CREATE TABLE if not exists rules (
@@ -91,12 +130,20 @@ def createDB():
                 port VARCHAR(64) NOT NULL,
                 protocol VARCHAR(16) NOT NULL,
                 action VARCHAR(10) NOT NULL,
-                name DATETIME DEFAULT (datetime('now', 'localtime')),
+                name VARCHAR(200) ,
+                time DATETIME DEFAULT (datetime('now', 'localtime')),
+                pushed VARCHAR(2) DEFAULT(0),
                 UNIQUE(host,direction,ip,port,protocol),
                 FOREIGN KEY (host) REFERENCES hosts(host),
                 FOREIGN KEY (direction) REFERENCES direction(name),
                 FOREIGN KEY (protocol) REFERENCES protocol(name),
                 FOREIGN KEY (action) REFERENCES action(name))""")
+    query.exec_("""CREATE TRIGGER [rules_UpdateLastTime]  
+                   AFTER UPDATE ON rules
+                   FOR EACH ROW WHEN OLD.host!=NEW.host or OLD.direction!=NEW.direction or OLD.ip!=NEW.ip or OLD.port!=NEW.port or OLD.protocol!=NEW.protocol or OLD.action!=NEW.action  
+                BEGIN  
+                    update rules set pushed=(0) where id=OLD.id;  
+                END""")
     #query.exec_("""CREATE TRIGGER [rules_UpdateLastTime]  
     #               AFTER UPDATE ON rules
     #               FOR EACH ROW WHEN NEW.name <= OLD.name  
@@ -109,15 +156,67 @@ def createDB():
                 BEGIN  
                     update hosts set time=(datetime('now', 'localtime')) where id=OLD.id;  
                 END""")
-    query.exec_("""CREATE TABLE if not exists password (
+    query.exec_("""CREATE TABLE if not exists password_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 host VARCHAR(32) NOT NULL,
-                password VARCHAR(20) NOT NULL,
+                username VARCHAR(32) NOT NULL,
+                password VARCHAR(32) NOT NULL,
                 time DATETIME DEFAULT (datetime('now', 'localtime')),
                 FOREIGN KEY (host) REFERENCES hosts(host)
                 )""")
+    query.exec_("""CREATE TABLE if not exists password (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                host VARCHAR(32) NOT NULL,
+                password VARCHAR(32) NOT NULL,
+                time DATETIME DEFAULT (datetime('now', 'localtime')),
+                FOREIGN KEY (host) REFERENCES hosts(host),
+                UNIQUE(host))""")
+    query.exec_("""CREATE TRIGGER [password_UpdateLastTime]  
+                   AFTER UPDATE ON password
+                   FOR EACH ROW WHEN NEW.time <= OLD.time  
+                BEGIN  
+                    update password set time=(datetime('now', 'localtime')) where id=OLD.id;  
+                END""")
     QApplication.processEvents()
 
+def reloadModel(form):
+    form.ruleModel.setTable("rules")
+    #将rules表的第HOST个属性设为hosts表的host属性外键，并将其显示为hosts表的host属性的值
+    form.ruleModel.setRelation(RULES_HOST,QSqlRelation("hosts", "host", "host"))
+    form.ruleModel.setRelation(RULES_DIRECTION,QSqlRelation("direction", "name", "name"))
+    form.ruleModel.setRelation(RULES_PROTOCOL,QSqlRelation("protocol", "name", "name"))
+    form.ruleModel.setRelation(RULES_ACTION,QSqlRelation("action", "name", "name"))
+    form.ruleModel.setSort(RULES_ID, Qt.AscendingOrder)
+    form.ruleModel.setHeaderData(RULES_ID, Qt.Horizontal,"id")
+    form.ruleModel.setHeaderData(RULES_HOST, Qt.Horizontal,"主机ip")
+    form.ruleModel.setHeaderData(RULES_DIRECTION, Qt.Horizontal,"方向")
+    form.ruleModel.setHeaderData(RULES_IP, Qt.Horizontal,"ip/网段")
+    form.ruleModel.setHeaderData(RULES_PORT, Qt.Horizontal,"端口号/端口范围")
+    form.ruleModel.setHeaderData(RULES_PROTOCOL, Qt.Horizontal,"协议")
+    form.ruleModel.setHeaderData(RULES_ACTION, Qt.Horizontal,"策略")
+    form.ruleModel.setHeaderData(RULES_NAME, Qt.Horizontal,"规则名字")
+    form.ruleModel.setHeaderData(RULES_TIME, Qt.Horizontal,"规则时间")
+    form.ruleModel.setHeaderData(RULES_PUSHED, Qt.Horizontal,"已推送")
+    form.ruleModel.select()
+    
+def reloadView(form):
+    form.ruleView.setModel(form.ruleModel)
+    form.ruleView.setItemDelegate(RuleDelegate(form))
+    form.ruleView.setSelectionMode(QTableView.SingleSelection)
+    form.ruleView.setSelectionBehavior(QTableView.SelectRows)
+    #form.ruleView.setColumnHidden(NAME, True)
+    #form.ruleView.resizeColumnsToContents()
+    form.ruleView.setColumnWidth(RULES_ID, 60)
+    form.ruleView.setColumnWidth(RULES_HOST, 242)
+    form.ruleView.setColumnWidth(RULES_DIRECTION, 50)
+    form.ruleView.setColumnWidth(RULES_IP, 168)
+    form.ruleView.setColumnWidth(RULES_PORT, 128)
+    form.ruleView.setColumnWidth(RULES_PROTOCOL, 66)
+    form.ruleView.setColumnWidth(RULES_ACTION, 72)
+    form.ruleView.setColumnWidth(RULES_NAME, 128)
+    form.ruleView.setColumnWidth(RULES_TIME, 168)
+    form.ruleView.setColumnWidth(RULES_PUSHED, 52)
+    
 class SecComm():
     def __init__(self,key):
         self.key=key
@@ -138,18 +237,22 @@ class SecComm():
         
     def remoteExecute(self,host,port,command):
         if not command:  
-            return  
+            return
+        if "/" in host or "-" in host:
+            return
         try:
             clientsocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            clientsocket.settimeout(1)
+            clientsocket.settimeout(1.5)
             clientsocket.connect((host, port))
         except socket.error as e:
             msg='fail to setup socket connection {}:{},because:{}'.format(host,port,str(e))
             logging.error(msg)
-            #print(msg)
             clientsocket.close()
             raise e
             return
+        except Exception as e:
+            logging.error("Exception in remoteExecute,{0}".format(str(e)))
+            raise(e)
         logging.info("send to {}:{}>>>>>>>>>>>>\n{}".format(host,port,command))
         command=bytes(command,encoding="utf-8")
         command = self.encrypt(command)
@@ -159,6 +262,15 @@ class SecComm():
         res = res.decode("utf-8")
         logging.info("recv from {}:{}<<<<<<<<<<<<\n{}".format(host,port,res))
         clientsocket.close()
+        if (not res.startswith("0,") and not res.startswith("1,")):
+            err_msg = "Error Occurred in Executing in Remote System"
+            logging.error(err_msg)
+            raise Exception(err_msg)
+        elif (not res.startswith("0,")):
+            err_msg = "Execute in remote but error occurred,please check logs"
+            logging.error(err_msg)
+            raise Exception(err_msg)
+        res=res[2:]
         return res
         
 class prpcrypt():  
@@ -180,29 +292,32 @@ class prpcrypt():
         plain_text = cryptor.decrypt(a2b_hex(text))  
         return plain_text.rstrip(b'\0')
 
-class PasswordDlg(QDialog):
+class PasswordLogDlg(QDialog):
     def __init__(self, table, title, parent=None):
-        super(PasswordDlg, self).__init__(parent)
+        super(PasswordLogDlg, self).__init__(parent)
         self.model = QSqlRelationalTableModel(self)
+        self.setWindowTitle("密码修改日志")
         self.model.setTable(table)
-        self.model.setRelation(HOST,QSqlRelation("hosts", "host", "host"))
-        self.model.setSort(TIME, Qt.DescendingOrder)
-        self.model.setHeaderData(ID, Qt.Horizontal,"ID")
-        self.model.setHeaderData(HOST, Qt.Horizontal, "主机ip")
-        self.model.setHeaderData(DESCRIPTION, Qt.Horizontal,"密码")
-        self.model.setHeaderData(TIME, Qt.Horizontal,"时间")
+        self.model.setRelation(PASSWORD_LOG_HOST,QSqlRelation("hosts", "host", "host"))
+        self.model.setSort(PASSWORD_LOG_TIME, Qt.DescendingOrder)
+        self.model.setHeaderData(PASSWORD_LOG_ID, Qt.Horizontal,"ID")
+        self.model.setHeaderData(PASSWORD_LOG_HOST, Qt.Horizontal, "主机ip")
+        self.model.setHeaderData(PASSWORD_LOG_USERNAME, Qt.Horizontal,"用户名")
+        self.model.setHeaderData(PASSWORD_LOG_PASSWORD, Qt.Horizontal,"密码")
+        self.model.setHeaderData(PASSWORD_LOG_TIME, Qt.Horizontal,"时间")
         self.model.select()
 
         self.view = QTableView()
         self.view.setModel(self.model)
-        self.view.setItemDelegate(PasswordRuleDelegate(self))#设置所有列不可修改
+        self.view.setItemDelegate(PasswordLogDelegate(self))#设置所有列不可修改
         self.view.setSelectionMode(QTableView.SingleSelection)
         self.view.setSelectionBehavior(QTableView.SelectRows)
-        self.view.setColumnWidth(ID, 30)
-        self.view.setColumnWidth(HOST, 168)
-        self.view.setColumnWidth(PASSWORD, 144)
-        self.view.setColumnWidth(TIME, 168)
-        self.setMinimumWidth(640)
+        self.view.setColumnWidth(PASSWORD_LOG_ID, 50)
+        self.view.setColumnWidth(PASSWORD_LOG_HOST, 168)
+        self.view.setColumnWidth(PASSWORD_LOG_USERNAME, 144)
+        self.view.setColumnWidth(PASSWORD_LOG_PASSWORD, 144)
+        self.view.setColumnWidth(PASSWORD_LOG_TIME, 168)
+        self.setMinimumWidth(740)
         self.setMinimumHeight(480)
         
         label_ip=QLabel("主机过滤器: ")#绑定label到窗口
@@ -221,68 +336,263 @@ class PasswordDlg(QDialog):
 
     def hostFilterEditingFinished(self):
         filter=self.textbox_ip.text()
-        self.model.setFilter(("password.host like '%{}%'".format(filter)))
+        self.model.setFilter(("password_log.host like '%{}%'".format(filter)))
         self.model.select()
-        
-class ReferenceDataDlg(QDialog):
+
+class SetPasswordDlg(QDialog):
     def __init__(self, table, title, parent=None):
-        super(ReferenceDataDlg, self).__init__(parent)
-        self.model = QSqlTableModel(self)
-        #self.model.setEditStrategy(QSqlTableModel.OnFieldChange)
-        self.model.setEditStrategy(QSqlTableModel.OnManualSubmit)#设置更新数据库的策略，手动更新数据库
-        self.model.dataChanged.connect(self.model.submitAll)#在model变化时写入数据库
+        super(SetPasswordDlg, self).__init__(parent)
+        self.setWindowTitle("编辑密码")
+        self.model = QSqlRelationalTableModel(self)
         self.model.setTable(table)
-        self.model.setSort(HOST, Qt.AscendingOrder)
-        self.model.setHeaderData(ID, Qt.Horizontal,"ID")
-        self.model.setHeaderData(HOST, Qt.Horizontal, "主机ip")
-        self.model.setHeaderData(DESCRIPTION, Qt.Horizontal,"描述")
-        self.model.setHeaderData(TIME, Qt.Horizontal,"时间")
+        self.model.setEditStrategy(QSqlTableModel.OnFieldChange)
+        self.model.dataChanged.connect(self.model.submitAll)#在model变化时写入数据库
+        self.model.setRelation(PASSWORD_HOST,QSqlRelation("hosts", "host", "host"))
+        self.model.setSort(PASSWORD_TIME, Qt.DescendingOrder)
+        self.model.setHeaderData(PASSWORD_ID, Qt.Horizontal,"ID")
+        self.model.setHeaderData(PASSWORD_HOST, Qt.Horizontal, "主机ip")
+        self.model.setHeaderData(PASSWORD_PASSWORD, Qt.Horizontal,"密码")
+        self.model.setHeaderData(PASSWORD_TIME, Qt.Horizontal,"时间")
         self.model.select()
 
         self.view = QTableView()
         self.view.setModel(self.model)
-        self.view.setItemDelegate(RuleDelegate(self))#设置id列不可修改
+        self.view.setItemDelegate(PasswordDelegate(self))#设置ID,time列不可修改
+        self.view.setSelectionMode(QTableView.SingleSelection)
+        self.view.setSelectionBehavior(QTableView.SelectRows)
+        self.view.setColumnWidth(PASSWORD_ID, 50)
+        self.view.setColumnWidth(PASSWORD_HOST, 242)
+        self.view.setColumnWidth(PASSWORD_PASSWORD, 144)
+        self.view.setColumnWidth(PASSWORD_TIME, 168)
+        self.setMinimumWidth(648)
+        self.setMinimumHeight(480)
+        
+        label_ip=QLabel("主机过滤器: ")#绑定label到窗口
+        self.textbox_ip = QLineEdit()
+        self.textbox_ip.setPlaceholderText("例如：1.1.1.1 或 1.1.1 或 1.%.1,按下回车后生效")
+        self.textbox_ip.setClearButtonEnabled(True)
+        addButton = QPushButton("&添加")
+        deleteButton = QPushButton("&删除")
+        expandButton = QPushButton("&展开网段")
+        backButton = QPushButton("&不修改并返回")
+        okButton = QPushButton("&修改并返回")
+        
+        buttonLayout = QHBoxLayout()
+        buttonLayout.addWidget(addButton)
+        buttonLayout.addWidget(deleteButton)
+        buttonLayout.addWidget(expandButton)
+        buttonLayout.addWidget(backButton)
+        buttonLayout.addStretch()
+        buttonLayout.addWidget(okButton)
+        dataLayout = QVBoxLayout()
+        filterLayout = QHBoxLayout()
+        filterLayout.addWidget(label_ip)
+        filterLayout.addWidget(self.textbox_ip)
+        dataLayout.addLayout(filterLayout)
+        dataLayout.addWidget(self.view, 1)
+        dataLayout.addLayout(buttonLayout)
+        self.setLayout(dataLayout)
+        
+        self.textbox_ip.editingFinished.connect(self.hostFilterEditingFinished)
+        addButton.clicked.connect(self.addRecord)
+        deleteButton.clicked.connect(self.deleteRecord)
+        expandButton.clicked.connect(self.expandHosts)
+        backButton.clicked.connect(self.back)
+        okButton.clicked.connect(self.ok)
+
+    def hostFilterEditingFinished(self):
+        filter=self.textbox_ip.text()
+        self.model.setFilter(("password.host like '%{}%'".format(filter)))
+        self.model.select()
+        
+    def back(self):
+        self.model.select()
+        self.accept()#退出对话框
+    
+    #修改并返回
+    def ok(self):
+        row =self.model.rowCount()#返回qtableview显示的行数
+        if row==0:return
+        passwords={}
+        query=QSqlQuery()
+        for r in range(row):
+            host=self.model.data(self.model.index(r, PASSWORD_HOST))
+            password=self.model.data(self.model.index(r, PASSWORD_PASSWORD))
+            if host not in passwords:
+                passwords[host]={"host":host,"password":password}
+        for host in passwords:
+            password = passwords[host]["password"]
+            if "/" in host or "-" in host:
+                continue
+            query.exec_("select username from hosts where host='{0}'".format(host))
+            if not query.next():
+                continue
+            username = query.value(0)
+            if len(username)==0:
+                err_msg = "请为host:{0}指定username".format(host)
+                message=QMessageBox(QMessageBox.NoIcon, "异常", err_msg)
+                logging.error(err_msg)
+                message.exec()
+                continue
+            cmd="changePassword?username={0}&password={1}".format(username,password)
+            if "/" not in host and "-" not in host:
+                try:
+                    form.seccomm.remoteExecute(host,SERVER_PORT,cmd)
+                    QSqlDatabase.database().transaction()
+                    query.exec_("insert into password_log('host','username','password') values('{0}','{1}','{2}')".format(host,username,password))
+                    QSqlDatabase.database().commit()
+                except socket.error as e:
+                    err_msg = "{0}\n由于 {1}:{2} 连接异常，无法修改该主机的用户名密码".format(str(e),host,SERVER_PORT)
+                    message=QMessageBox(QMessageBox.NoIcon, "异常", err_msg)
+                    logging.error(err_msg)
+                    message.exec()
+                except Exception as e:
+                    err_msg = "{0}".format(e)
+                    message=QMessageBox(QMessageBox.NoIcon, "异常", err_msg)
+                    logging.error(err_msg)
+                    message.exec()
+        self.accept()#退出对话框
+        
+    def addRecord(self):
+        row = self.model.rowCount()
+        self.model.insertRow(row)
+        index = self.model.index(row, PASSWORD_HOST)
+        self.view.setCurrentIndex(index)
+        self.view.edit(index)
+        self.model.submitAll()
+
+    def deleteRecord(self):
+        index = self.view.currentIndex()
+        if not index.isValid():
+            return
+        self.model.removeRow(index.row())
+        self.model.submitAll()
+        self.model.select()
+        #QSqlDatabase.database().commit()
+        
+    def expandHosts(self):
+        row =self.model.rowCount()#返回qtableview显示的行数
+        if row==0:return
+        hosts=[]
+        query=QSqlQuery()
+        #query.exec_("""select host,password from password""")
+        for r in range(row):
+            subnet=self.model.data(self.model.index(r, PASSWORD_HOST))
+            password=self.model.data(self.model.index(r, PASSWORD_PASSWORD))
+            if "/" not in subnet and "-" not in subnet:
+                continue
+            subnet=parseSubnet(subnet)
+            for host in subnet:
+                hosts.append({"host":host,"password":password})
+        for host in hosts:
+            #此段代码展开host会覆盖原来host
+            QSqlDatabase.database().transaction()
+            query.exec_("insert or replace into password (host,password) values('{0}','{1}')".format(host["host"],host["password"]))
+            QSqlDatabase.database().commit()
+        self.model.select()
+        return
+    
+class PasswordDelegate(QSqlRelationalDelegate):
+    def __init__(self, parent=None):
+        super(PasswordDelegate, self).__init__(parent)
+
+    def paint(self, painter, option, index):
+        myoption = QStyleOptionViewItem(option)
+        QSqlRelationalDelegate.paint(self, painter, myoption, index)
+
+    def createEditor(self, parent, option, index):
+        if index.column() == PASSWORD_ID or index.column()==PASSWORD_TIME:
+            return
+        return QSqlRelationalDelegate.createEditor(self, parent,option, index)
+
+    def setEditorData(self, editor, index):
+        if index.column() == PASSWORD_ID or index.column()==PASSWORD_TIME:
+            return
+        QSqlRelationalDelegate.setEditorData(self, editor, index)
+
+    def setModelData(self, editor, model, index):
+        QSqlRelationalDelegate.setModelData(self, editor, model,index)
+        
+class HostReferenceDataDlg(QDialog):
+    def __init__(self, table, title, parent=None):
+        super(HostReferenceDataDlg, self).__init__(parent)
+        self.model = QSqlTableModel(self)
+        self.model.setEditStrategy(QSqlTableModel.OnFieldChange)
+        #self.model.setEditStrategy(QSqlTableModel.OnManualSubmit)#设置更新数据库的策略，手动更新数据库
+        self.model.dataChanged.connect(self.model.submitAll)#在model变化时写入数据库
+        self.model.setTable(table)
+        self.model.setSort(HOSTS_HOST, Qt.AscendingOrder)
+        self.model.setHeaderData(HOSTS_ID, Qt.Horizontal,"ID")
+        self.model.setHeaderData(HOSTS_HOST, Qt.Horizontal, "主机ip")
+        self.model.setHeaderData(HOSTS_USERNAME, Qt.Horizontal, "用户名")
+        self.model.setHeaderData(HOSTS_DESCRIPTION, Qt.Horizontal,"描述")
+        self.model.setHeaderData(HOSTS_TIME, Qt.Horizontal,"时间")
+        self.model.select()
+
+        self.view = QTableView()
+        self.view.setModel(self.model)
+        self.view.setItemDelegate(HostDelegate(self))#设置id,time列不可修改
         self.view.setSelectionMode(QTableView.SingleSelection)
         self.view.setSelectionBehavior(QTableView.SelectRows)
         #self.view.setColumnHidden(ID, True)
         #self.view.resizeColumnsToContents()
-        self.view.setColumnWidth(ID, 30)
-        self.view.setColumnWidth(HOST, 168)
-        self.view.setColumnWidth(DESCRIPTION, 144)
-        self.view.setColumnWidth(TIME, 168)
-        self.setMinimumWidth(640)
+        self.view.setColumnWidth(HOSTS_ID, 50)
+        self.view.setColumnWidth(HOSTS_HOST, 242)
+        self.view.setColumnWidth(HOSTS_USERNAME, 144)
+        self.view.setColumnWidth(HOSTS_DESCRIPTION, 144)
+        self.view.setColumnWidth(HOSTS_TIME, 168)
+        self.setMinimumWidth(814)
         self.setMinimumHeight(480)
+        label_ip=QLabel("主机过滤器: ")#绑定label到窗口
+        self.textbox_ip = QLineEdit()
+        self.textbox_ip.setPlaceholderText("例如：1.1.1.1 或 1.1.1 或 1.%.1,按下回车后生效")
+        self.textbox_ip.setClearButtonEnabled(True)
         addButton = QPushButton("&添加")
         deleteButton = QPushButton("&删除")
+        expandButton = QPushButton("&展开网段")
         okButton = QPushButton("&完成")
         if not MAC:
             addButton.setFocusPolicy(Qt.NoFocus)
             deleteButton.setFocusPolicy(Qt.NoFocus)
-
+            expandButton.setFocusPolicy(Qt.NoFocus)
+            okButton.setFocusPolicy(Qt.NoFocus)
         buttonLayout = QHBoxLayout()
         buttonLayout.addWidget(addButton)
         buttonLayout.addWidget(deleteButton)
+        buttonLayout.addWidget(expandButton)
         buttonLayout.addStretch()
         buttonLayout.addWidget(okButton)
-        layout = QVBoxLayout()
-        layout.addWidget(self.view)
-        layout.addLayout(buttonLayout)
-        self.setLayout(layout)
-
+        dataLayout = QVBoxLayout()
+        filterLayout = QHBoxLayout()
+        filterLayout.addWidget(label_ip)
+        filterLayout.addWidget(self.textbox_ip)
+        dataLayout.addLayout(filterLayout)
+        dataLayout.addWidget(self.view, 1)
+        dataLayout.addLayout(buttonLayout)
+        self.setLayout(dataLayout)
+        self.textbox_ip.editingFinished.connect(self.hostFilterEditingFinished)
         addButton.clicked.connect(self.addRecord)
         deleteButton.clicked.connect(self.deleteRecord)
+        expandButton.clicked.connect(self.expandHosts)
         okButton.clicked.connect(self.ok)
-
         self.setWindowTitle("防火墙规则管理器 - 编辑 {0} 引用数据".format(title))
+
+    def hostFilterEditingFinished(self):
+        filter=self.textbox_ip.text()
+        self.model.setFilter(("hosts.host like '%{}%'".format(filter)))
+        self.model.select()
                 
     def ok(self):
+        global form
+        reloadModel(form)
+        reloadView(form)
         self.model.select()
         self.accept()#退出对话框
         
     def addRecord(self):
         row = self.model.rowCount()
         self.model.insertRow(row)
-        index = self.model.index(row, HOST)
+        index = self.model.index(row, RULES_HOST)
         self.view.setCurrentIndex(index)
         self.view.edit(index)
         #QApplication.processEvents()
@@ -294,7 +604,7 @@ class ReferenceDataDlg(QDialog):
             return
         #QSqlDatabase.database().transaction()
         record = self.model.record(index.row())
-        host = record.value(HOST)
+        host = record.value(RULES_HOST)
         table = self.model.tableName()
         query = QSqlQuery()
         if table == "hosts":
@@ -304,9 +614,10 @@ class ReferenceDataDlg(QDialog):
             count = query.value(0)
             #print(count)
         if count:
+            err_msg = "不能从数据表<br>{1}删除{0}，这是由于主机还有{2}条防火墙规则没有删除".format(record.value(RULES_HOST),table,count)
             QMessageBox.information(self,
                     "删除 {0}".format(table),
-                    ("不能从数据表<br>{1}删除{0}，这是由于主机还有{2}条防火墙规则没有删除").format(record.value(HOST),table,count))
+                    err_msg)
             #QSqlDatabase.database().rollback()
             return
         self.model.removeRow(index.row())
@@ -314,9 +625,63 @@ class ReferenceDataDlg(QDialog):
         self.model.select()
         #QSqlDatabase.database().commit()
         
-class PasswordRuleDelegate(QSqlRelationalDelegate):
+    def expandHosts(self):
+        row =self.model.rowCount()#返回qtableview显示的行数
+        if row==0:return
+        hosts=[]
+        query=QSqlQuery()
+        #query.exec_("""select host,username,description from hosts""")
+        for r in range(row):
+            subnet=self.model.data(self.model.index(r, HOSTS_HOST))
+            username=self.model.data(self.model.index(r, HOSTS_USERNAME))            
+            description=self.model.data(self.model.index(r, HOSTS_DESCRIPTION))
+            if "/" not in subnet and "-" not in subnet:
+                continue
+            subnet=parseSubnet(subnet)
+            for host in subnet:
+                hosts.append({"host":host,"username":username,"description":description})
+        for host in hosts:
+            #此段代码展开不会覆盖原来host
+            #query.exec_("select count(*) from hosts where host='{0}'".format(host["host"]))
+            #if query.next() and query.value(0)!=0:
+            #    continue
+            
+            #此段代码展开会覆盖原来host
+            QSqlDatabase.database().transaction()
+            query.exec_("insert or replace into hosts (host,username,description) values('{0}','{1}','{2}')".format(host["host"],host["username"],host["description"]))
+            QSqlDatabase.database().commit()
+        self.model.select()
+        return
+            
+class HostDelegate(QSqlRelationalDelegate):
     def __init__(self, parent=None):
-        super(PasswordRuleDelegate, self).__init__(parent)
+        super(HostDelegate, self).__init__(parent)
+
+    def paint(self, painter, option, index):
+        myoption = QStyleOptionViewItem(option)
+        QSqlRelationalDelegate.paint(self, painter, myoption, index)
+
+    def createEditor(self, parent, option, index):
+        if index.column() == HOSTS_ID or index.column()==HOSTS_TIME:
+            return
+        if index.column() == HOSTS_HOST:
+            editor = QLineEdit(parent)
+            editor.setPlaceholderText('1.1.1.1或1.1.1.1/24或1.1.1.1-1.1.1.22')
+            editor.setAlignment(Qt.AlignRight|Qt.AlignVCenter)
+            return editor
+        return QSqlRelationalDelegate.createEditor(self, parent,option, index)
+
+    def setEditorData(self, editor, index):
+        if index.column() == HOSTS_ID:
+            return
+        QSqlRelationalDelegate.setEditorData(self, editor, index)
+
+    def setModelData(self, editor, model, index):
+        QSqlRelationalDelegate.setModelData(self, editor, model,index)
+        
+class PasswordLogDelegate(QSqlRelationalDelegate):
+    def __init__(self, parent=None):
+        super(PasswordLogDelegate, self).__init__(parent)
 
     def paint(self, painter, option, index):
         myoption = QStyleOptionViewItem(option)
@@ -337,19 +702,19 @@ class RuleDelegate(QSqlRelationalDelegate):
 
     def paint(self, painter, option, index):
         myoption = QStyleOptionViewItem(option)
-        if index.column() == ACTION:
+        if index.column() == RULES_ACTION:
             myoption.displayAlignment |= (Qt.AlignRight|Qt.AlignVCenter)
         QSqlRelationalDelegate.paint(self, painter, myoption, index)
 
     def createEditor(self, parent, option, index):
-        if index.column() == ID or index.column()==NAME:
+        if index.column() == RULES_ID or index.column()==RULES_TIME or index.column()==RULES_PUSHED:
             return
-        if index.column() == IP:
+        if index.column() == RULES_IP:
             editor = QLineEdit(parent)
             editor.setPlaceholderText('1.1.1.1或1.1.1.1/24')
             editor.setAlignment(Qt.AlignRight|Qt.AlignVCenter)
             return editor
-        if index.column() == PORT:
+        if index.column() == RULES_PORT:
             editor = QLineEdit(parent)
             regex = QRegExp(r"^(([1-9]\d{0,3})|([1-5]\d{4})|(6[1-4]\d{3})|(65[1-4]\d{2})|(655[1-2]\d)|(6553[1-5]))(:(([1-9]\d{0,3})|([1-5]\d{4})|(6[1-4]\d{3})|(65[1-4]\d{2})|(655[1-2]\d)|(6553[1-5])))?$")
             validator = QRegExpValidator(regex, parent)
@@ -360,8 +725,6 @@ class RuleDelegate(QSqlRelationalDelegate):
         return QSqlRelationalDelegate.createEditor(self, parent,option, index)
 
     def setEditorData(self, editor, index):
-        if index.column() == ID:
-            return
         QSqlRelationalDelegate.setEditorData(self, editor, index)
 
     def setModelData(self, editor, model, index):
@@ -370,45 +733,16 @@ class RuleDelegate(QSqlRelationalDelegate):
 class MainForm(QDialog):
     def __init__(self):
         super(MainForm, self).__init__()
-        self.seccomm=SecComm(b'5xQLFb4RdA9wqYi2')
+        self.seccomm=SecComm(AES_KEY)
         query=QSqlQuery()
         query.exec_("PRAGMA foreign_keys = ON;")
         self.ruleModel = QSqlRelationalTableModel(self)
-        #self.ruleModel.setEditStrategy(QSqlTableModel.OnFieldChange)#设置更新数据库的策略，在属性变化时写入数据库
-        self.ruleModel.setEditStrategy(QSqlTableModel.OnManualSubmit)#设置更新数据库的策略，手动更新数据库
+        self.ruleModel.setEditStrategy(QSqlTableModel.OnFieldChange)#设置更新数据库的策略，在属性变化时写入数据库
+        #self.ruleModel.setEditStrategy(QSqlTableModel.OnManualSubmit)#设置更新数据库的策略，手动更新数据库
         self.ruleModel.dataChanged.connect(self.ruleModel.submitAll)#在model变化时写入数据库
-        self.ruleModel.setTable("rules")
-        #将rules表的第HOST个属性设为hosts表的host属性外键，并将其显示为hosts表的host属性的值
-        self.ruleModel.setRelation(HOST,QSqlRelation("hosts", "host", "host"))
-        self.ruleModel.setRelation(DIRECTION,QSqlRelation("direction", "name", "name"))
-        self.ruleModel.setRelation(PROTOCOL,QSqlRelation("protocol", "name", "name"))
-        self.ruleModel.setRelation(ACTION,QSqlRelation("action", "name", "name"))
-        self.ruleModel.setSort(ID, Qt.AscendingOrder)
-        self.ruleModel.setHeaderData(ID, Qt.Horizontal,"id")
-        self.ruleModel.setHeaderData(HOST, Qt.Horizontal,"主机ip")
-        self.ruleModel.setHeaderData(DIRECTION, Qt.Horizontal,"方向")
-        self.ruleModel.setHeaderData(IP, Qt.Horizontal,"ip/网段")
-        self.ruleModel.setHeaderData(PORT, Qt.Horizontal,"端口号/端口范围")
-        self.ruleModel.setHeaderData(PROTOCOL, Qt.Horizontal,"协议")
-        self.ruleModel.setHeaderData(ACTION, Qt.Horizontal,"策略")
-        self.ruleModel.setHeaderData(NAME, Qt.Horizontal,"规则名字")
-        self.ruleModel.select()
-
+        reloadModel(self)
         self.ruleView = QTableView()
-        self.ruleView.setModel(self.ruleModel)
-        self.ruleView.setItemDelegate(RuleDelegate(self))
-        self.ruleView.setSelectionMode(QTableView.SingleSelection)
-        self.ruleView.setSelectionBehavior(QTableView.SelectRows)
-        #self.ruleView.setColumnHidden(NAME, True)
-        #self.ruleView.resizeColumnsToContents()
-        self.ruleView.setColumnWidth(ID, 54)
-        self.ruleView.setColumnWidth(HOST, 128)
-        self.ruleView.setColumnWidth(DIRECTION, 50)
-        self.ruleView.setColumnWidth(IP, 168)
-        self.ruleView.setColumnWidth(PORT, 128)
-        self.ruleView.setColumnWidth(PROTOCOL, 72)
-        self.ruleView.setColumnWidth(ACTION, 72)
-        self.ruleView.setColumnWidth(NAME, 168)
+        reloadView(self)
         ruleLabel = QLabel("")
         ruleLabel.setBuddy(self.ruleView)
 
@@ -416,15 +750,16 @@ class MainForm(QDialog):
         self.textbox_ip = QLineEdit()
         self.textbox_ip.setPlaceholderText("例如：1.1.1.1 或 1.1.1 或 1.%.1,按下回车后生效")
         self.textbox_ip.setClearButtonEnabled(True)
-        passwordButton = QPushButton("密码修改日志")
-        #refreshButton = QPushButton("刷新规则显示")
+        setPasswordButton = QPushButton("修改密码")
+        viewPasswordButton = QPushButton("密码修改日志")
         editHostsButton = QPushButton("编辑主机")
         addRuleButton = QPushButton("添加规则")
         deleteRuleButton = QPushButton("删除规则")
+        expandRuleButton = QPushButton("展开规则")
         pushButton = QPushButton("把规则推送给防火墙")
         pullButton = QPushButton("从防火墙读取规则")
         quitButton = QPushButton("退出")
-        for button in (passwordButton,editHostsButton,addRuleButton, deleteRuleButton,pushButton,pullButton,quitButton):
+        for button in (setPasswordButton,viewPasswordButton,editHostsButton,addRuleButton,deleteRuleButton,expandRuleButton,pushButton,pullButton,quitButton):
             if MAC:
                 button.setDefault(False)
                 button.setAutoDefault(False)
@@ -439,10 +774,12 @@ class MainForm(QDialog):
         dataLayout.addLayout(filterLayout)
         dataLayout.addWidget(self.ruleView, 1)
         buttonLayout = QVBoxLayout()
-        buttonLayout.addWidget(passwordButton)
+        buttonLayout.addWidget(setPasswordButton)
+        buttonLayout.addWidget(viewPasswordButton)
         buttonLayout.addWidget(editHostsButton)
         buttonLayout.addWidget(addRuleButton)
         buttonLayout.addWidget(deleteRuleButton)
+        buttonLayout.addWidget(expandRuleButton)
         buttonLayout.addWidget(pushButton)
         buttonLayout.addWidget(pullButton)
         buttonLayout.addStretch()
@@ -454,17 +791,18 @@ class MainForm(QDialog):
 
         self.textbox_ip.editingFinished.connect(self.hostFilterEditingFinished)
         self.ruleView.selectionModel().currentRowChanged.connect(self.ruleChanged)
-        #refreshButton.clicked.connect(self.refreshView)
-        passwordButton.clicked.connect(self.viewPassword)
+        setPasswordButton.clicked.connect(self.setPassword)
+        viewPasswordButton.clicked.connect(self.viewPasswordLog)
         editHostsButton.clicked.connect(self.editHosts)
         addRuleButton.clicked.connect(self.addRule)
         deleteRuleButton.clicked.connect(self.deleteRule)
+        expandRuleButton.clicked.connect(self.expandRule)
         pushButton.clicked.connect(self.updateFirewall)
         pullButton.clicked.connect(self.updateDB)
         quitButton.clicked.connect(self.done)
 
         self.ruleChanged(self.ruleView.currentIndex())
-        self.setMinimumWidth(1040)
+        self.setMinimumWidth(1336)
         self.setMinimumHeight(480)
         self.setWindowTitle("防火墙规则管理器")
         #self.updateDB()
@@ -482,13 +820,39 @@ class MainForm(QDialog):
         filter=self.textbox_ip.text()
         self.ruleModel.setFilter(("rules.host like '%{}%'".format(filter)))
         self.ruleModel.select()
-            
-    #def refreshView(self):
-    #    self.ruleModel.select()
-        
-    def updateDB(self):
+    
+    def expandRule(self):
         row =self.ruleModel.rowCount()#返回qtableview显示的行数
         if row==0:return
+        hosts=[]
+        query=QSqlQuery()
+        #query.exec_("""select host,direction,ip,port,protocol,action,name from rules""")
+        for r in range(row):
+            subnet=self.ruleModel.data(self.ruleModel.index(r, RULES_HOST))
+            direction = self.ruleModel.data(self.ruleModel.index(r, RULES_DIRECTION))
+            ip = self.ruleModel.data(self.ruleModel.index(r, RULES_IP))
+            port = self.ruleModel.data(self.ruleModel.index(r, RULES_PORT))
+            protocol = self.ruleModel.data(self.ruleModel.index(r, RULES_PROTOCOL))
+            action = self.ruleModel.data(self.ruleModel.index(r, RULES_ACTION))
+            name = self.ruleModel.data(self.ruleModel.index(r, RULES_NAME))
+            if "/" not in subnet and "-" not in subnet:
+                continue
+            subnet=parseSubnet(subnet)
+            for host in subnet:
+                hosts.append({"host":host,"direction":direction,"ip":ip,"port":port,"protocol":protocol,"action":action,"name":name})
+        for host in hosts:
+            #query.exec_("select count(*) from hosts where host='{0}'".format(host["host"]))
+            #if query.next() and query.value(0)!=0:
+            #    continue
+            QSqlDatabase.database().transaction()
+            query.exec_("insert into rules(host,direction,ip,port,protocol,action,name) values('{0}','{1}','{2}','{3}','{4}','{5}','{6}')".format(host["host"],host["direction"],host["ip"],host["port"],host["protocol"],host["action"],host["name"]))
+            QSqlDatabase.database().commit()
+        self.ruleModel.select()
+        return
+            
+    def updateDB(self):
+        #row =self.ruleModel.rowCount()#返回qtableview显示的行数
+        #if row==0:return
         hosts=[]
         query=QSqlQuery()
         query.exec_("""select host from hosts""")
@@ -505,9 +869,11 @@ class MainForm(QDialog):
         for host in hosts:
             query=QSqlQuery()
             QSqlDatabase.database().transaction()
-            query.exec_("DELETE FROM rules where host='{}'".format(host))
+            query.exec_("DELETE FROM rules where host='{0}' and pushed='0'".format(host))
             self.ruleModel.select()
             try:
+                if "/" in host or "-" in host:
+                    continue
                 lines = self.getFirewallRules(host)
             except Exception as e:
                 msg="\"{}\" occurs while getFirewallRules in {}:{},rollback...".format(str(e),host,SERVER_PORT)
@@ -526,69 +892,100 @@ class MainForm(QDialog):
                 protocol=tmp[3].strip()
                 action=tmp[4].strip()
                 try:
-                    name=tmp[5]
+                    rule_time=tmp[5]
                 except:
-                    name=''
-                logging.info("pull from remote firewall:({},{},{},{},{},{},{})".format(host,direction,ip,port,protocol,action,name))
-                logging.info("INSERT into rules(host,direction,ip,port,protocol,action,name) values('{}','{}','{}','{}','{}','{}','{}')".format(host,direction,ip,port,protocol,action,name))
-                query.exec_("INSERT into rules(host,direction,ip,port,protocol,action,name) values('{}','{}','{}','{}','{}','{}','{}')".format(host,direction,ip,port,protocol,action,name))
+                    rule_time=''
+                logging.info("pull from remote firewall:({},{},{},{},{},{},{})".format(host,direction,ip,port,protocol,action,rule_time))
+                query.exec_("update rules set pushed='temp' where host='{0}' and direction='{1}' and ip='{2}' and port='{3}' and protocol='{4}' and action='{5}'".format(host,direction,ip,port,protocol,action))
+                query.exec_("select host from rules where host='{0}' and direction='{1}' and ip='{2}' and port='{3}' and protocol='{4}' and action='{5}'".format(host,direction,ip,port,protocol,action))
+                if not query.next():
+                    if len(rule_time)!=0:
+                        logging.info("INSERT into rules(host,direction,ip,port,protocol,action,time,pushed) values('{}','{}','{}','{}','{}','{}','{}','{}')".format(host,direction,ip,port,protocol,action,rule_time,'temp'))
+                        query.exec_("INSERT into rules(host,direction,ip,port,protocol,action,time,pushed) values('{}','{}','{}','{}','{}','{}','{}','{}')".format(host,direction,ip,port,protocol,action,rule_time,'temp'))
+                    else:
+                        logging.info("INSERT into rules(host,direction,ip,port,protocol,action,pushed) values('{}','{}','{}','{}','{}','{}','{}')".format(host,direction,ip,port,protocol,action,'temp'))
+                        query.exec_("INSERT into rules(host,direction,ip,port,protocol,action,pushed) values('{}','{}','{}','{}','{}','{}','{}')".format(host,direction,ip,port,protocol,action,'temp'))
+            query.exec_("DELETE FROM rules where host='{0}' and pushed='1'".format(host))
+            #self.ruleModel.select()
+            #time.sleep(1)
+            query.exec_("update rules set pushed='1' where host='{0}' and pushed='{1}'".format(host,'temp'))
             QSqlDatabase.database().commit()
-        self.ruleModel.select()
+            self.ruleModel.select()
+            #time.sleep(1)
+        #self.ruleModel.select()
         
-    def updateFirewall(self):#direction,ip,protocol,port,action,name
+    def updateFirewall(self):#direction,ip,protocol,port,action,time
         row =self.ruleModel.rowCount()#返回qtableview显示的行数
         if row==0:return
         hosts=[]
         rules={}
+        query=QSqlQuery()
         for r in range(row):
-            host=self.ruleModel.data(self.ruleModel.index(r, HOST))
+            host=self.ruleModel.data(self.ruleModel.index(r, RULES_HOST))
             if host not in hosts:
                 hosts.append(host)
                 rules[host]=[]
-            direction=self.ruleModel.data(self.ruleModel.index(r, DIRECTION))
-            ip=self.ruleModel.data(self.ruleModel.index(r, IP))
-            protocol=self.ruleModel.data(self.ruleModel.index(r, PROTOCOL))
-            port=self.ruleModel.data(self.ruleModel.index(r, PORT))
-            action=self.ruleModel.data(self.ruleModel.index(r, ACTION))
-            name=self.ruleModel.data(self.ruleModel.index(r, NAME))
-            rules[host].append({"direction":direction,"ip":ip,"protocol":protocol,"port":port,"action":action,"name":name})
+            direction=self.ruleModel.data(self.ruleModel.index(r, RULES_DIRECTION))
+            ip=self.ruleModel.data(self.ruleModel.index(r, RULES_IP))
+            protocol=self.ruleModel.data(self.ruleModel.index(r, RULES_PROTOCOL))
+            port=self.ruleModel.data(self.ruleModel.index(r, RULES_PORT))
+            action=self.ruleModel.data(self.ruleModel.index(r, RULES_ACTION))
+            rule_time=self.ruleModel.data(self.ruleModel.index(r, RULES_TIME))
+            rules[host].append({"direction":direction,"ip":ip,"protocol":protocol,"port":port,"action":action,"time":rule_time})
         for host in hosts:
             directions=[]
             ips=[]
             protocols=[]
             ports=[]
             actions=[]
-            names=[]
+            times=[]
             for rule in rules[host]:
                 directions.append(rule['direction'])
                 ips.append(rule['ip'])
                 protocols.append(rule['protocol'])
                 ports.append(rule['port'])
                 actions.append(rule['action'])
-                names.append(rule['name'])
+                times.append(rule['time'])
             directions=",".join(directions)
             ips=",".join(ips)
             protocols=",".join(protocols)
             ports=",".join(ports)
             actions=",".join(actions)
-            names=",".join(names)
+            times=",".join(times)
             #cmd1="".format(names)
-            cmd="addRule?direction={}&ip={}&protocol={}&port={}&action={}&name={}".format(directions,ips,protocols,ports,actions,names)
-            try:
-                self.seccomm.remoteExecute(host,SERVER_PORT,cmd)
-            except socket.error as e:
-                message=QMessageBox(QMessageBox.NoIcon, "异常", "{}\n由于 {}:{} 连接异常，无法更新该主机的防火墙规则".format(str(e),host,SERVER_PORT));
-                message.exec();
+            cmd="addRule?direction={}&ip={}&protocol={}&port={}&action={}&name={}".format(directions,ips,protocols,ports,actions,times)
+            if "/" not in host and "-" not in host:
+                try:
+                    self.seccomm.remoteExecute(host,SERVER_PORT,cmd)
+                    QSqlDatabase.database().transaction()
+                    sql="update rules set pushed='1' where host='{0}'".format(host)
+                    query.exec_(sql)
+                    QSqlDatabase.database().commit()
+                    self.ruleModel.select()
+                except socket.error as e:
+                    err_msg = "{0}\n由于 {1}:{2} 连接异常，无法更新该主机的防火墙规则".format(e,host,SERVER_PORT)
+                    message=QMessageBox(QMessageBox.NoIcon, "异常", err_msg)
+                    logging.error(err_msg)
+                    message.exec()
+                except Exception as e:
+                    err_msg = "异常{0}\n{1}:{2}".format(e,host,SERVER_PORT)
+                    message=QMessageBox(QMessageBox.NoIcon, "异常", err_msg)
+                    logging.error(err_msg)
+                    message.exec()
             
     def done(self, result=1):
         QDialog.done(self, 1)
         
-    def viewPassword(self):
-        form = PasswordDlg("password", "password", self)
+    def setPassword(self):
+        form = SetPasswordDlg("password", "password", self)
+        form.exec_()
+        
+    def viewPasswordLog(self):
+        form = PasswordLogDlg("password_log", "password_log", self)
         form.exec_()
         
     def editHosts(self):
-        form = ReferenceDataDlg("hosts", "host", self)
+        form = HostReferenceDataDlg("hosts", "host", self)
         form.exec_()
         
     def ruleChanged(self, index):
@@ -606,7 +1003,7 @@ class MainForm(QDialog):
         if query.next():
             row = query.value(0)
         self.ruleModel.insertRow(row)
-        index = self.ruleModel.index(row, HOST)
+        index = self.ruleModel.index(row, RULES_HOST)
         self.ruleView.setCurrentIndex(index)
         self.ruleView.edit(index)
         self.ruleModel.submitAll()
@@ -620,26 +1017,36 @@ class MainForm(QDialog):
             return
         QSqlDatabase.database().transaction()
         record = self.ruleModel.record(index.row())
-        ruleid = record.value(ID)
-        msg = ("<font color=red>删除</font><br><b>规则 {0}</b>?").format(record.value(ID))
+        ruleid = record.value(RULES_ID)
+        msg = ("<font color=red>删除</font><br><b>规则 {0}</b>?").format(record.value(RULES_ID))
         if (QMessageBox.question(self, "删除规则", msg,QMessageBox.Yes|QMessageBox.No) ==QMessageBox.No):
             QSqlDatabase.database().rollback()
             return
-        host = record.value(HOST)
-        direction = record.value(DIRECTION)
-        ip=record.value(IP)
-        port=record.value(PORT)
-        protocol=record.value(PROTOCOL)
-        action=record.value(ACTION)
-        name=record.value(NAME)
-        cmd="delRule?direction={}&ip={}&protocol={}&port={}&action={}&name={}".format(direction,ip,protocol,port,action,name)
-        try:
-            self.seccomm.remoteExecute(host,SERVER_PORT,cmd)
-        except socket.error as e:
-            QSqlDatabase.database().rollback()
-            message=QMessageBox(QMessageBox.NoIcon, "异常", "{}\n由于 {}:{} 连接异常，此规则暂时无法删除".format(str(e),host,SERVER_PORT))
-            message.exec()
-            return
+        host = record.value(RULES_HOST)
+        direction = record.value(RULES_DIRECTION)
+        ip=record.value(RULES_IP)
+        port=record.value(RULES_PORT)
+        protocol=record.value(RULES_PROTOCOL)
+        action=record.value(RULES_ACTION)
+        rule_time=record.value(RULES_TIME)
+        pushed = record.value(RULES_PUSHED)
+        cmd="delRule?direction={}&ip={}&protocol={}&port={}&action={}&name={}".format(direction,ip,protocol,port,action,rule_time)
+        if ("/" not in host and "-" not in host and pushed == '1'):
+            try:
+                self.seccomm.remoteExecute(host,SERVER_PORT,cmd)
+            except socket.error as e:
+                QSqlDatabase.database().rollback()
+                err_msg = "{0}\n由于 {1}:{2} 连接异常，此规则暂时无法删除".format(str(e),host,SERVER_PORT)
+                logging.error(err_msg)
+                message=QMessageBox(QMessageBox.NoIcon, "异常", err_msg)
+                message.exec()
+                return
+            except Exception as e:
+                QSqlDatabase.database().rollback()
+                err_msg = "异常{0}\n{1}:{2}".format(e,host,SERVER_PORT)
+                message=QMessageBox(QMessageBox.NoIcon, "异常", err_msg)
+                logging.error(err_msg)
+                message.exec()
         self.ruleModel.removeRow(index.row())
         self.ruleModel.submitAll()
         QSqlDatabase.database().commit()
@@ -647,20 +1054,25 @@ class MainForm(QDialog):
         self.ruleChanged(self.ruleView.currentIndex())
         
 def changePasswordThread():
-    seccomm = SecComm(b'5xQLFb4RdA9wqYi2')
+    seccomm = SecComm(AES_KEY)
     while True:
         query = QSqlQuery()
         QSqlDatabase.database().transaction()
-        query.exec_("""select host,time from (SELECT host,time FROM password union select host,0 from hosts) group by host having julianday(datetime('now', 'localtime')) - julianday(time) >={}""".format(CHANGE_PASSWORD_FREQUENCY))
+        query.exec_("""select host,username,time from (SELECT host,username,time FROM password_log union select host,username,0 from hosts) group by host having julianday(datetime('now', 'localtime')) - julianday(time) >={}""".format(CHANGE_PASSWORD_FREQUENCY))
         while query.next():
             host = query.value(0)
+            username = query.value(1)
             #logging.info(host)
             new_password=gen_random_name()
             #new_password="abcd1234"
             try:
-                res=seccomm.remoteExecute(host,SERVER_PORT,"changePassword?password={}".format(new_password))
-                query.exec_("""INSERT INTO password (host,password) VALUES("{}","{}")""".format(host,new_password))
-                logging.info("set password in host {} to {}".format(host,new_password))
+                if len(username):
+                    res=seccomm.remoteExecute(host,SERVER_PORT,"changePassword?username={0}&password={1}".format(username,new_password))
+                    query.exec_("""INSERT INTO password_log (host,username,password) VALUES("{0}","{1}","{2}")""".format(host,username,new_password))
+                else:
+                    res=seccomm.remoteExecute(host,SERVER_PORT,"changePassword?password={0}".format(new_password))
+                    query.exec_("""INSERT INTO password_log (host,password) VALUES("{0}","{1}")""".format(host,new_password))
+                logging.info("set password in host {0} to {1}".format(host,new_password))
                 if host.strip()=="127.0.0.1":
                     print("主机{0}的密码已经修改为{1}，请谨记！".format(host,new_password))
             except Exception as e:
@@ -671,6 +1083,7 @@ def changePasswordThread():
         time.sleep(CHECK_CHANGE_PASSWORD_INTERVAL)
 
 def main():
+    global form
     app = QApplication(sys.argv)
     filename = os.path.join(os.path.dirname(__file__), "rules.db")
     create = not QFile.exists(filename)
@@ -688,8 +1101,9 @@ def main():
     if create:
         app.processEvents()
         app.restoreOverrideCursor()
-    chgPwdTread= threading.Thread(target=changePasswordThread)
-    chgPwdTread.start()
+    #应客户要求，此处不使用定期修改随机密码的形式
+    #chgPwdTread= threading.Thread(target=changePasswordThread)
+    #chgPwdTread.start()
     app.exec_()
     del form
     del db

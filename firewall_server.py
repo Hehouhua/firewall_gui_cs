@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 import os
-import sys      
+import sys  
 import socket
 import datetime
 import logging
 from time import ctime  
 from Cryptodome.Cipher import AES  
 from binascii import b2a_hex, a2b_hex
+from subprocess import PIPE,Popen
 
 IP="0.0.0.0"
 PORT=7777
 DEBUG=False
+AES_KEY=b'5xQLFb4RdA9wqYi2'
 FORMAT = '[%(levelname)s]\t%(asctime)s : %(message)s'
-LOG_NAME = datetime.datetime.now().strftime('FirewallTool_Server_%Y_%m_%d_%H.log')
+LOG_NAME = datetime.datetime.now().strftime('Firewall_Server_%Y_%m_%d_%H.log')
 logging.basicConfig(filename=LOG_NAME, level = logging.DEBUG, format=FORMAT)
 class prpcrypt():  
     def __init__(self, key):  
@@ -39,7 +41,9 @@ class Server():
             print("Please run in linux or windows")
             sys.exit(-1)
         if self.is_os_linux() and os.geteuid() != 0:
-            print("This program must be run as root. Aborting...")
+            msg="This program must be run as root. Aborting..."    
+            logging.info(msg)
+            print(msg)
             sys.exit(-1) 
         self.ip=ip
         self.port=port
@@ -66,19 +70,21 @@ class Server():
     def start_tcp_server(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_address = (self.ip, self.port)
-        logging.info('starting listen on ip {}, port {}'.format(self.ip,self.port))
+        msg='listening on {0}:{1}'.format(self.ip,self.port)
+        print(msg)
+        logging.info(msg)
         sock.bind(server_address)
         try:
             sock.listen(5)
         except socket.error as e:
-            logging.error("fail to listen on port {}".format(e))
+            logging.error("fail to listen on port {0}".format(e))
             sys.exit(1)
         while True:
             client,addr = sock.accept()
-            logging.info('connected by {}'.format(addr))
+            logging.info('connected by {0}'.format(addr))
             data = client.recv(2048)  
             if not data:  
-                continue  
+                continue
             logging.debug("recv:{}".format(data))
             data = self.decrypt(data)
             path,param_dict=self.parse_req(data)
@@ -113,22 +119,26 @@ class Server():
                     name = param_dict["name"]
                     res = self.addRule(direction,ip,protocol,port,action,name)
                 except Exception as e:
-                    res=self.encrypt(str(e))
+                    res="1,{0}".format(e)
             elif "changePassword" == path:
                 try:
-                    #username = param_dict["username"]
+                    if "username" in param_dict:
+                        username = param_dict["username"]
+                    else:
+                        username = ""
                     password = param_dict["password"]
-                    res = self.changePassword(password)
-                except:
-                    res="params not enough in changePassword."
+                    res = self.changePassword(username,password)
+                except Exception as e:
+                    res="1,{0}".format(e)
             elif "cu5t0m" == path and DEBUG:
                 try:
                     command = param_dict["command"]
                     res = self.exec_cmd(command)
                 except:
-                    res="params not enough in cu5t0m."
-            res=self.encrypt(res)
+                    res="1,params not enough in cu5t0m."
             logging.info("server response:{}".format(res))
+            res=self.encrypt(res)
+            #logging.info("server response:{}".format(res))
             client.send(res)
             client.close()
         
@@ -145,22 +155,31 @@ class Server():
     
     def exec_cmd(self,command):
         logging.info("executing system command:{}".format(command))
-        result = os.popen(command)
-        res = result.read().strip()
-        logging.info("executing system command result:{}".format(res))
-        return res
+        #result = os.popen(command)
+        #res = result.read().strip()
+        p = Popen(command,shell=True,stdout = PIPE, stderr = PIPE)
+        stdout, stderr = p.communicate()
+        try:
+            stdout, stderr = stdout.decode("utf-8"), stderr.decode("utf-8")
+        except Exception as e:
+            stdout, stderr = stdout.decode("gbk"), stderr.decode("gbk")
+        logging.info("executing system command result:code={0},stdout={1},stderr={2}".format(p.returncode,stdout,stderr))
+        if p.returncode==0:
+            return "0,{0}".format(stdout)
+        else:
+            return "1,{0},{1}".format(stdout,stderr)
         
     def encrypt(self,string):
         if isinstance(string,str):
             string = string.encode("utf-8")
-        pc = prpcrypt(b'5xQLFb4RdA9wqYi2')
+        pc = prpcrypt(AES_KEY)
         string=pc.encrypt(string)
         return string
         
     def decrypt(self,string):
         if isinstance(string,str):
             string = string.encode("utf-8")
-        pc = prpcrypt(b'5xQLFb4RdA9wqYi2')
+        pc = prpcrypt(AES_KEY)
         string=pc.decrypt(string)
         return string
        
@@ -223,7 +242,7 @@ class Server():
         except WindowsError as e:
             logging.error(str(e))
             pass
-        return result.strip()
+        return "0,{0}".format(result.strip())
     
     def linux_getFirewall(self):
         cmd="""a=`iptables -L INPUT -n|awk -F ' ' 'BEGIN {count=-2;} {if(count>=0){action[count] = $1;protocol[count]=$2;ip[count]=$4;port[count]=$7;}count++;}; END{for (i = 0; i < NR; i++) if(ip[i]&&port[i]&&protocol[i]&&action[i]){ print "In","|",ip[i],"|",port[i],"|",protocol[i],"|",action[i];}}'`;b=`iptables -L OUTPUT -n|awk -F ' ' 'BEGIN {count=-2;} {if(count>=0){action[count] = $1;protocol[count]=$2;ip[count]=$4;port[count]=$7;}count++;}; END{for (i = 0; i < NR; i++) if(ip[i]&&port[i]&&protocol[i]&&action[i]){ print "Out","|",ip[i],"|",port[i],"|",protocol[i],"|",action[i];}}'`;echo "$a";echo "$b";"""
@@ -238,11 +257,18 @@ class Server():
             lines = self.win_getFirewall()
         return lines
         
-    def changePassword(self,password):
-        if self.is_os_linux():
-            cmd="passwd --stdin  {}".format(password)# read new tokens from stdin (root only)
-        elif self.is_os_windows():
-            cmd="""for /F "delims=\\ tokens=2*" %i in ('whoami') do net user %i {}""".format(password)
+    def changePassword(self,username,password):
+        if len(username)==0:
+            if self.is_os_linux():
+                cmd="passwd --stdin  {0}".format(password)# read new tokens from stdin (root only)
+            elif self.is_os_windows():
+                cmd="""for /F "delims=\\ tokens=2*" %i in ('whoami') do net user %i {0}""".format(password)
+        else:
+            if self.is_os_linux():
+                cmd="echo {0}:{1}|chpasswd".format(username,password)
+            elif self.is_os_windows():
+                cmd="""net user {0} {1}""".format(username,password)
+            
         res=self.exec_cmd(cmd)
         return res
             
@@ -303,7 +329,10 @@ class Server():
         return res
         
     def addRule(self,direction,ip,protocol,port,action,name):
+        #try:
         self.delAllRules(name)
+        #except:
+        #    pass
         direction = direction.split(",")
         ip = ip.split(",")
         protocol=protocol.split(",")
