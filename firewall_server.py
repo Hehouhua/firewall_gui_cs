@@ -10,7 +10,7 @@ from binascii import b2a_hex, a2b_hex
 from subprocess import PIPE,Popen
 
 IP="0.0.0.0"
-PORT=7777
+PORT=21777
 DEBUG=False
 AES_KEY=b'5xQLFb4RdA9wqYi2'
 FORMAT = '[%(levelname)s]\t%(asctime)s : %(message)s'
@@ -34,7 +34,7 @@ class prpcrypt():
         cryptor = AES.new(self.key, self.mode, self.key)  
         plain_text = cryptor.decrypt(a2b_hex(text))  
         return plain_text.rstrip(b'\0')
-		
+        
 class Server():
     def __init__(self,ip,port):
         if not self.is_os_linux() and not self.is_os_windows():
@@ -160,9 +160,9 @@ class Server():
         p = Popen(command,shell=True,stdout = PIPE, stderr = PIPE)
         stdout, stderr = p.communicate()
         try:
-            stdout, stderr = stdout.decode("utf-8"), stderr.decode("utf-8")
+            stdout, stderr = stdout.decode("utf-8").strip(), stderr.decode("utf-8").strip()
         except Exception as e:
-            stdout, stderr = stdout.decode("gbk"), stderr.decode("gbk")
+            stdout, stderr = stdout.decode("gbk").strip(), stderr.decode("gbk").strip()
         logging.info("executing system command result:code={0},stdout={1},stderr={2}".format(p.returncode,stdout,stderr))
         if p.returncode==0:
             return "0,{0}".format(stdout)
@@ -255,6 +255,18 @@ class Server():
             lines = self.linux_getFirewall()
         elif self.is_os_windows():
             lines = self.win_getFirewall()
+        #In|0.0.0.0|22|tcp|REJECT|2018-07-05 11:22:02
+        #Out|0.0.0.0|8888|tcp|REJECT|2018-07-08 14:21:24
+        #Out|0.0.0.0|8888|udp|REJECT|2018-07-08 14:21:24
+        delim="\n"
+        status_code = lines[:2]
+        lines=lines[2:].split(delim)
+        for i in range(len(lines)):
+            for j in range(i+1,len(lines)):
+                if ("tcp" in lines[i] and (lines[i].replace("tcp","udp")==lines[j])) or ("udp" in lines[i] and (lines[i].replace("udp","tcp")==lines[j])):
+                    lines[i]=lines[i].replace("udp","all").replace("tcp","all")
+                    lines[j]=""
+        lines=status_code+delim.join(lines).replace(delim+delim,delim)
         return lines
         
     def changePassword(self,username,password):
