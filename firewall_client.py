@@ -50,7 +50,7 @@ RULES_NAME = 7
 RULES_TIME = 8
 RULES_PUSHED = 9
 #服务器监听的端口
-SERVER_PORT=21777
+SERVER_PORT=20777
 #几天修改一次密码
 CHANGE_PASSWORD_FREQUENCY=7
 #几秒检查一次密码是否到期了，8*60*60表示8小时
@@ -133,14 +133,14 @@ def createDB():
                 name VARCHAR(200) ,
                 time DATETIME DEFAULT (datetime('now', 'localtime')),
                 pushed VARCHAR(2) DEFAULT(0),
-                UNIQUE(host,direction,ip,port,protocol),
+                UNIQUE(host,direction,ip,port,protocol,name),
                 FOREIGN KEY (host) REFERENCES hosts(host),
                 FOREIGN KEY (direction) REFERENCES direction(name),
                 FOREIGN KEY (protocol) REFERENCES protocol(name),
                 FOREIGN KEY (action) REFERENCES action(name))""")
     query.exec_("""CREATE TRIGGER [rules_UpdateLastTime]  
                    AFTER UPDATE ON rules
-                   FOR EACH ROW WHEN OLD.host!=NEW.host or OLD.direction!=NEW.direction or OLD.ip!=NEW.ip or OLD.port!=NEW.port or OLD.protocol!=NEW.protocol or OLD.action!=NEW.action  
+                   FOR EACH ROW WHEN OLD.host!=NEW.host or OLD.direction!=NEW.direction or OLD.ip!=NEW.ip or OLD.port!=NEW.port or OLD.protocol!=NEW.protocol or OLD.action!=NEW.action or OLD.name!=NEW.name 
                 BEGIN  
                     update rules set pushed=(0) where id=OLD.id;  
                 END""")
@@ -213,7 +213,7 @@ def reloadView(form):
     form.ruleView.setColumnWidth(RULES_PORT, 128)
     form.ruleView.setColumnWidth(RULES_PROTOCOL, 66)
     form.ruleView.setColumnWidth(RULES_ACTION, 72)
-    form.ruleView.setColumnWidth(RULES_NAME, 128)
+    form.ruleView.setColumnWidth(RULES_NAME, 162)
     form.ruleView.setColumnWidth(RULES_TIME, 168)
     form.ruleView.setColumnWidth(RULES_PUSHED, 52)
     
@@ -803,8 +803,8 @@ class MainForm(QDialog):
         quitButton.clicked.connect(self.done)
 
         self.ruleChanged(self.ruleView.currentIndex())
-        self.setMinimumWidth(1336)
-        self.setMinimumHeight(480)
+        self.setMinimumWidth(1400)
+        self.setMinimumHeight(840)
         self.setWindowTitle("防火墙规则管理器")
         #self.updateDB()
         
@@ -892,37 +892,36 @@ class MainForm(QDialog):
                 protocol=tmp[3].strip()
                 action=tmp[4].strip()
                 try:
-                    rule_time=tmp[5]
+                    rule_name=tmp[5] #windows
                 except:
-                    rule_time=''
+                    rule_name=''  #linux
                 #logging.info("pull from remote firewall:({},{},{},{},{},{},{})".format(host,direction,ip,port,protocol,action,rule_time))
-                sql = "update rules set pushed='temp' where host='{0}' and direction='{1}' and ip='{2}' and port='{3}' and protocol='{4}' and action='{5}'".format(host,direction,ip,port,protocol,action)
-                logging.info(sql)
-                query.exec_(sql)
-                query=QSqlQuery()
-                sql = "select host from rules where host='{0}' and direction='{1}' and ip='{2}' and port='{3}' and protocol='{4}' and action='{5}'".format(host,direction,ip,port,protocol,action)
-                logging.info(sql)
-                query.exec_(sql)
-                a=query.next()
-                logging.info("query.next:{0}".format(a))
-                if not a:
-                    if len(rule_time)!=0:
-                        sql = "INSERT into rules(host,direction,ip,port,protocol,action,time,pushed) values('{}','{}','{}','{}','{}','{}','{}','{}')".format(host,direction,ip,port,protocol,action,rule_time,'temp')
-                        logging.info(sql)
-                        query.exec_(sql)
-                    else:
-                        sql = "INSERT into rules(host,direction,ip,port,protocol,action,pushed) values('{}','{}','{}','{}','{}','{}','{}')".format(host,direction,ip,port,protocol,action,'temp')
-                        logging.info(sql)
-                        query.exec_(sql)
-            sql = "DELETE FROM rules where host='{0}' and (pushed='0' or pushed='1')".format(host)
-            logging.info(sql)
-            query.exec_(sql)
-            #query.exec_("DELETE FROM rules where host='{0}' and pushed='1'".format(host))
-            #self.ruleModel.select()
-            #time.sleep(1)
-            sql = "update rules set pushed='1' where host='{0}' and pushed='{1}'".format(host,'temp')
-            logging.info(sql)
-            query.exec_(sql)
+                if len(rule_name):#windows
+                    sql1 = "select count(*) from rules where host='{0}' and direction='{1}' and ip='{2}' and port='{3}' and protocol='{4}' and action='{5}' and name='{6}';".format(host,direction,ip,port,protocol,action,rule_name)
+                    sql2 = "INSERT into rules(host,direction,ip,port,protocol,action,name,pushed) values('{}','{}','{}','{}','{}','{}','{}','{}');".format(host,direction,ip,port,protocol,action,rule_name,'temp')
+                else:#linux
+                    sql1 = "select count(*) from rules where host='{0}' and direction='{1}' and ip='{2}' and port='{3}' and protocol='{4}' and action='{5}';".format(host,direction,ip,port,protocol,action)
+                    sql2 = "INSERT into rules(host,direction,ip,port,protocol,action,pushed) values('{}','{}','{}','{}','{}','{}','{}');".format(host,direction,ip,port,protocol,action,'temp')                    
+                sql3 = "update rules set pushed='temp' where host='{0}' and direction='{1}' and ip='{2}' and port='{3}' and protocol='{4}' and action='{5}';".format(host,direction,ip,port,protocol,action)               
+                logging.info(sql1)
+                query.exec_(sql1)
+                count = 0
+                if query.next():
+                    count = query.value(0)
+                #logging.info("count:{0}".format(count))
+                if not count:
+                    logging.info(sql2)
+                    query.exec_(sql2)    
+                logging.info(sql3)
+                query.exec_(sql3)
+            QSqlDatabase.database().commit()
+            QSqlDatabase.database().transaction()
+            sql4 = "DELETE FROM rules where host='{0}' and pushed='1';".format(host)
+            sql5 = "update rules set pushed='1' where host='{0}' and pushed='{1}';".format(host,'temp')
+            logging.info(sql4)
+            query.exec_(sql4)
+            logging.info(sql5)
+            query.exec_(sql5)
             QSqlDatabase.database().commit()
             self.ruleModel.select()
             #time.sleep(1)
@@ -945,8 +944,14 @@ class MainForm(QDialog):
             port=self.ruleModel.data(self.ruleModel.index(r, RULES_PORT))
             action=self.ruleModel.data(self.ruleModel.index(r, RULES_ACTION))
             rule_time=self.ruleModel.data(self.ruleModel.index(r, RULES_TIME))
-            localname=self.ruleModel.data(self.ruleModel.index(r, RULES_NAME))
-            rules[host].append({"direction":direction,"ip":ip,"protocol":protocol,"port":port,"action":action,"time":rule_time,"localname":localname})
+            rule_name=self.ruleModel.data(self.ruleModel.index(r, RULES_NAME))
+            rule_pushed=self.ruleModel.data(self.ruleModel.index(r, RULES_PUSHED))
+            if len(rule_name)==0:
+                logging.warning("请为规则({0},{1},{2},{3},{4},{5})设置规则名字".format(direction,ip,protocol,port,action,rule_time))
+                continue
+            if rule_pushed == '1':
+                continue
+            rules[host].append({"direction":direction,"ip":ip,"protocol":protocol,"port":port,"action":action,"time":rule_time,"rule_name":rule_name})
         for host in hosts:
             directions=[]
             ips=[]
@@ -954,7 +959,7 @@ class MainForm(QDialog):
             ports=[]
             actions=[]
             times=[]
-            localnames=[]
+            rule_names=[]
             for rule in rules[host]:
                 directions.append(rule['direction'])
                 ips.append(rule['ip'])
@@ -962,21 +967,21 @@ class MainForm(QDialog):
                 ports.append(rule['port'])
                 actions.append(rule['action'])
                 times.append(rule['time'])
-                localnames.append(rule['localname'])
+                rule_names.append(rule['rule_name'])
             directions=",".join(directions)
             ips=",".join(ips)
             protocols=",".join(protocols)
             ports=",".join(ports)
             actions=",".join(actions)
             times=",".join(times)
-            localnames=",".join(localnames)
-            #cmd1="".format(names)
-            cmd="addRule?direction={0}&ip={1}&protocol={2}&port={3}&action={4}&name={5}&localname={6}".format(directions,ips,protocols,ports,actions,times,localnames)
+            rule_names=",".join(rule_names)
+            cmd="addRule?direction={0}&ip={1}&protocol={2}&port={3}&action={4}&name={5}".format(directions,ips,protocols,ports,actions,rule_names)
             if "/" not in host and "-" not in host:
                 try:
                     self.seccomm.remoteExecute(host,SERVER_PORT,cmd)
                     QSqlDatabase.database().transaction()
-                    sql="update rules set pushed='1' where host='{0}' and direction='{1}' and ip='{2}' and port='{3}' and protocol='{4}' and action='{5}'".format(host,direction,ip,port,protocol,action)
+                    #sql="update rules set pushed='1' where host='{0}' and direction='{1}' and ip='{2}' and port='{3}' and protocol='{4}' and action='{5}'".format(host,direction,ip,port,protocol,action)
+                    sql="update rules set pushed='1' where host='{0}' and length(name)!=0".format(host)
                     query.exec_(sql)
                     QSqlDatabase.database().commit()
                     self.ruleModel.select()
@@ -1046,10 +1051,10 @@ class MainForm(QDialog):
         port=record.value(RULES_PORT)
         protocol=record.value(RULES_PROTOCOL)
         action=record.value(RULES_ACTION)
-        rule_time=record.value(RULES_TIME)
+        rule_name=record.value(RULES_NAME)
         pushed = record.value(RULES_PUSHED)
-        localname = record.value(RULES_NAME)
-        cmd="delRule?direction={0}&ip={1}&protocol={2}&port={3}&action={4}&name={5}&localname={6}".format(direction,ip,protocol,port,action,rule_time,localname)
+        rule_time = record.value(RULES_TIME)
+        cmd="delRule?direction={0}&ip={1}&protocol={2}&port={3}&action={4}&name={5}&rule_time={6}".format(direction,ip,protocol,port,action,rule_name,rule_time)
         if ("/" not in host and "-" not in host and pushed == '1'):
             try:
                 self.seccomm.remoteExecute(host,SERVER_PORT,cmd)

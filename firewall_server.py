@@ -10,7 +10,7 @@ from binascii import b2a_hex, a2b_hex
 from subprocess import PIPE,Popen
 
 IP="0.0.0.0"
-PORT=21777
+PORT=20777
 DEBUG=False
 AES_KEY=b'5xQLFb4RdA9wqYi2'
 FORMAT = '[%(levelname)s]\t%(asctime)s : %(message)s'
@@ -82,7 +82,7 @@ class Server():
         while True:
             client,addr = sock.accept()
             logging.info('connected by {0}'.format(addr))
-            data = client.recv(2048)  
+            data = client.recv(65536)  
             if not data:  
                 continue
             logging.debug("recv:{}".format(data))
